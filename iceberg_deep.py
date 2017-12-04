@@ -1,4 +1,5 @@
 """A deep classifier using convolutional layers.
+  if.convert_to_tensor(test[0])
 uses the STATOIL Icebarge SAR dataset to discriminate between ships and icebergs
 """
 # Disable linter warnings to maintain consistency with tutorial.
@@ -20,6 +21,7 @@ import tensorflow as tf
 FLAGS = None
 IMAGE_SIZE = 75
 KERNEL_SIZE = 5
+KERNAL_SIZE_2 = 3
 NUM_CLASSES = 2
 NUM_FEAT_CONVO_1 = 32
 NUM_FEAT_CONVO_2 = 64
@@ -59,9 +61,16 @@ def deepnn(x, conv1_features, conv2_features, fc1_units, num_classes):
     h_conv2 = tf.nn.relu(tf.nn.conv2d(h_pool1, W_conv2, strides=[1, 1, 1, 1], padding='VALID') + b_conv2)
     activation_summaries(h_conv2)
 
+  # Third convolutional layer -- maps conv1_features to conv2_feature feature maps.
+  with tf.name_scope('conv3'):
+    W_conv3 = weight_variable([KERNEL_SIZE, KERNEL_SIZE, conv2_features, conv2_features])
+    b_conv3 = bias_variable([conv2_features])
+    h_conv3 = tf.nn.relu(tf.nn.conv2d(h_conv2, W_conv3, strides=[1, 1, 1, 1], padding='SAME') + b_conv3)
+    activation_summaries(h_conv3)
+
   # Second pooling layer.
   with tf.name_scope('pool2'):
-    h_pool2 = tf.nn.max_pool(h_conv2,ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME', name='h_pool2')
+    h_pool2 = tf.nn.max_pool(h_conv3,ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME', name='h_pool2')
 
   #create fully connected layer, mapping each convo feature to a new feature in a flat structure 
   with tf.name_scope('fc1'):
@@ -118,33 +127,45 @@ def bias_variable(shape):
   initial = tf.constant(0.1, shape=shape)#initializer=tf.constant_initializer(0.05)
   return tf.Variable(initial)
 
-def generate_batch(data, batch_size):
-  ii = np.random.choice(len(data[0]), batch_size, replace=False)
-  return (np.array([data[0][i] for i in ii]), np.array([data[1][i] for i in ii]))
+def format_dat(dat):
+  return tf.convert_to_tensor(dat) 
+
+def generate_batch(data, batch_size, iteration):
+  if not iteration:
+    #ii = np.random.choice(len(data[0]), batch_size, replace=False)
+    #return (tf.data.Dataset.from_tensor_slices(data[0]), tf.data.Dataset.from_tensor_slices(data[1])), None
+    return (data[0][:], data[1][:]), None
+  else:
+    st_list = range(0,data[0].shape[0],batch_size)
+    st = st_list[(iteration%len(st_list))]
+    if st+batch_size <= data[0].shape[0]:
+      #return (tf.data.Dataset.from_tensor_slices(data[0][st:st+batch_size]), tf.data.Dataset.from_tensor_slices(data[1][st:st+batch_size])), None
+      return (data[0][st:st+batch_size], data[1][st:st+batch_size]), None
+    else:
+       return (data[0][st:], data[1][st:]), 1
 
 def load_data(path, test_fraction):
   # functions for processing the json-format study data 
   def get_label(dat_dict):
     lab = np.array([0,0])
     lab[dat_dict['is_iceberg']] = 1.
-    return lab
+    return list(lab)
 
   def get_image(dat_dict):
-    return np.array([dat_dict['band_1'],dat_dict['band_2']]).T
+    return [dat_dict['band_1'],dat_dict['band_2']]
 
   with open(path, 'r+b') as fle:
     dat = json.load(fle)
     #put the images and labels into an array where each row is one observation
-    dataset = np.array([[get_image(d) for d in dat], [get_label(d) for d in dat]]).T
+    features, labels = np.array([get_image(d) for d in dat]), np.array([get_label(d) for d in dat])
   
   #break into test / train data
-  np.random.shuffle(dataset)
-  test_bool = np.zeros(dataset.shape[0])
-  num_test = int(dataset.shape[0] * test_fraction)
-  test_bool[np.random.choice(dataset.shape[0], num_test, replace=False)] = 1
-  test = dataset[np.where(test_bool==1)]
-  train = dataset[np.where(test_bool==0)]
-  return (test[:,0], test[:,1]), (train[:,0], train[:,1])
+  test_bool = np.zeros(labels.shape[0])
+  num_test = int(labels.shape[0] * test_fraction)
+  test_bool[np.random.choice(labels.shape[0], num_test, replace=False)] = 1
+  test = features[np.where(test_bool==1)], labels[np.where(test_bool==1)]
+  train = features[np.where(test_bool==0)], labels[np.where(test_bool==0)]
+  return (test[0], test[1]), (train[0], train[1])
 
 def variable_summaries(var):
   #attach summaries for tensorboard to read, visualize
@@ -165,17 +186,23 @@ def activation_summaries(var):
 def main(_):
   # Import data
   test, train = load_data(FLAGS.data_dir, 0.2)
+  x_shape = list(train[0].shape)
+  x_shape[0] = None
+  y_shape = list(train[1].shape)
+  y_shape[0] = None
 
   # Create the model
-  x = tf.placeholder(tf.float32, [None, IMAGE_SIZE*IMAGE_SIZE,2])
+  x = tf.placeholder(tf.float32, x_shape)
 
   # Define loss and optimizer
-  y_ = tf.placeholder(tf.float32, [None, NUM_CLASSES])
+  y_ = tf.placeholder(tf.float32, y_shape)
 
   # Build the graph for the deep net
   #get the size of the fully connected layer based on the input image size, the kernel size, and the number of convo features
-  size_after_conv_and_pool_twice = int(math.ceil((math.ceil(float(IMAGE_SIZE-KERNEL_SIZE+1)/2)-KERNEL_SIZE+1)/2))
-  num_fully_connected_features = size_after_conv_and_pool_twice**2 * NUM_FEAT_CONVO_2 
+  conv_m_pool_shape = int(math.ceil((math.ceil(float(IMAGE_SIZE-KERNEL_SIZE+1)/2)-KERNEL_SIZE+1)/2))
+  #conv1_pool_shape = math.ceil(IMAGE_SIZE / 2.)
+  #conv_m_pool_shape = math.ceil(conv1_pool_shape / 2.)
+  num_fully_connected_features = int(conv_m_pool_shape**2 * NUM_FEAT_CONVO_2) 
   y_conv, keep_prob = deepnn(x, NUM_FEAT_CONVO_1, NUM_FEAT_CONVO_2, num_fully_connected_features, NUM_CLASSES)
 
   with tf.name_scope('loss'):
@@ -205,9 +232,13 @@ def main(_):
     sess.run(tf.global_variables_initializer())
     #initialize saver to restore model later
     saver = tf.train.Saver()
-    test_batch = generate_batch(test, test[0].shape[0])
+    test_batch, _ = generate_batch(test, 320, None)
     for i in range(2000):
-      batch = generate_batch(train, 50)
+      batch, epoch_flag = generate_batch(train, 50, i)
+      if epoch_flag:
+        ii = np.array(range(train[0].shape[0]))
+        np.random.shuffle(ii)
+        train = (train[0][ii], train[1][ii])
       summary_train, _ = sess.run([merged, train_step],feed_dict={x: batch[0], 
                                                                   y_: batch[1], 
                                                                   keep_prob: 0.5})
